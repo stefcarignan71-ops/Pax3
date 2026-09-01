@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pax 3 — Connexion</title>
+<style>
+  :root{
+    --bg:#15181d;          /* fond ardoise réel, pas un noir teinté */
+    --panel:#1e232b;
+    --line:#2c333d;
+    --ink:#e8eaed;
+    --muted:#8b95a3;
+    --heat:#e8933a;        /* ambre = chaleur, la signature du Pax */
+    --heat-soft:#3a2c1a;
+    --wake:#4aa3ff;        /* bleu « pétales » au réveil */
+    --ok:#5bc98a;
+    --bad:#e8735a;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    line-height:1.5; padding:24px 18px 40px;
+    max-width:560px; margin:0 auto;
+    -webkit-font-smoothing:antialiased;
+  }
+  header{display:flex; align-items:center; gap:14px; margin-bottom:22px}
+  /* le point lumineux = pétale du Pax : gris éteint, bleu au réveil, ambre connecté */
+  .glow{width:16px; height:16px; border-radius:50%; background:var(--muted);
+        box-shadow:0 0 0 0 transparent; flex:0 0 auto; transition:background .3s}
+  .glow.wake{background:var(--wake); animation:pulse 1.1s ease-in-out infinite}
+  .glow.on{background:var(--heat); box-shadow:0 0 14px 2px rgba(232,147,58,.55)}
+  .glow.err{background:var(--bad)}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(74,163,255,.5)}50%{box-shadow:0 0 14px 4px rgba(74,163,255,.15)}}
+  @media (prefers-reduced-motion:reduce){.glow.wake{animation:none}}
+  h1{font-size:1.15rem; font-weight:600; margin:0}
+  .state{color:var(--muted); font-size:.9rem; margin-top:1px}
+  button{
+    width:100%; border:none; border-radius:12px; padding:15px 18px;
+    font-size:1rem; font-weight:600; color:#160d03; background:var(--heat);
+    cursor:pointer; transition:opacity .15s;
+  }
+  button:active{opacity:.8}
+  button.ghost{background:transparent; color:var(--muted); border:1px solid var(--line); font-weight:500}
+  button:disabled{opacity:.4; cursor:default}
+  .row{display:flex; gap:10px; margin-top:12px}
+  .panel{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; margin-top:18px}
+  .panel h2{font-size:.78rem; font-weight:600; color:var(--muted); margin:0 0 10px; letter-spacing:.02em}
+  .kv{display:flex; justify-content:space-between; gap:12px; padding:5px 0; font-size:.92rem}
+  .kv span:first-child{color:var(--muted)}
+  .kv span:last-child{font-family:var(--mono); text-align:right; word-break:break-all}
+  .char{border-top:1px solid var(--line); padding:11px 0}
+  .char:first-of-type{border-top:none}
+  .char .id{font-family:var(--mono); font-size:.9rem; color:var(--ink)}
+  .char .props{margin-top:5px; display:flex; flex-wrap:wrap; gap:6px}
+  .tag{font-size:.72rem; padding:2px 8px; border-radius:999px; background:var(--heat-soft); color:var(--heat)}
+  .tag.n{background:#182a1e; color:var(--ok)}
+  #log{font-family:var(--mono); font-size:.8rem; color:var(--muted);
+       white-space:pre-wrap; word-break:break-all; max-height:230px; overflow:auto; margin:0}
+  #log b{color:var(--ink); font-weight:600}
+  .hint{color:var(--muted); font-size:.85rem; margin-top:16px}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="glow" id="glow"></div>
+  <div>
+    <h1>Pax 3 — Connexion</h1>
+    <div class="state" id="state">Prêt</div>
+  </div>
+</header>
+
+<button id="connect">Connecter le Pax</button>
+<div class="row hidden" id="actions">
+  <button class="ghost" id="disconnect">Déconnecter</button>
+</div>
+
+<div class="panel hidden" id="deviceCard">
+  <h2>Appareil</h2>
+  <div class="kv"><span>Nom</span><span id="dName">—</span></div>
+  <div class="kv"><span>GATT</span><span id="dGatt">—</span></div>
+</div>
+
+<div class="panel hidden" id="charCard">
+  <h2>Caractéristiques du service Pax</h2>
+  <div id="chars"></div>
+</div>
+
+<div class="panel hidden" id="logCard">
+  <h2>Journal</h2>
+  <pre id="log"></pre>
+</div>
+
+<p class="hint" id="hint"></p>
+
+<script>
+"use strict";
+
+// Service propriétaire du Pax 3 — confirmé depuis ton appareil via chrome://bluetooth-internals
+const PAX_SERVICE = "8e320200-64d2-11e6-bdf4-0800200c9a66";
+const DEVICE_INFO  = "0000180a-0000-1000-8000-00805f9b34fb"; // infos appareil (optionnel)
+
+const $ = id => document.getElementById(id);
+const glow = $("glow"), state = $("state");
+let device = null, server = null;
+
+function setState(txt, mode){            // mode: '', 'wake', 'on', 'err'
+  state.textContent = txt;
+  glow.className = "glow" + (mode ? " " + mode : "");
+}
+function show(id){ $(id).classList.remove("hidden"); }
+function hide(id){ $(id).classList.add("hidden"); }
+
+function log(msg, strong){
+  show("logCard");
+  const t = new Date().toLocaleTimeString("fr-CA");
+  $("log").insertAdjacentHTML("beforeend",
+    (strong ? `<b>[${t}] ${msg}</b>` : `[${t}] ${msg}`) + "\n");
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function propsOf(c){
+  const p = c.properties, out = [];
+  if(p.read) out.push("read");
+  if(p.write) out.push("write");
+  if(p.writeWithoutResponse) out.push("writeNR");
+  if(p.notify) out.push("notify");
+  if(p.indicate) out.push("indicate");
+  return out;
+}
+
+function toHex(dv){
+  const b = new Uint8Array(dv.buffer);
+  return Array.from(b, x => x.toString(16).padStart(2,"0")).join(" ");
+}
+
+async function connect(){
+  if(!navigator.bluetooth){
+    setState("Web Bluetooth indisponible", "err");
+    $("hint").textContent =
+      "Ouvre cette page dans Chrome sur Android, servie en HTTPS. Le protocole file:// et Safari/iOS ne supportent pas Web Bluetooth.";
+    return;
+  }
+  try{
+    setState("Sélection de l'appareil…", "wake");
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: "PAX" }],
+      optionalServices: [PAX_SERVICE, DEVICE_INFO]
+    });
+    log(`Appareil choisi : ${device.name || "(sans nom)"}`, true);
+    device.addEventListener("gattserverdisconnected", onDisconnected);
+
+    setState("Connexion GATT…", "wake");
+    server = await device.gatt.connect();
+    log("Serveur GATT connecté");
+
+    $("dName").textContent = device.name || "—";
+    $("dGatt").textContent = "connecté";
+    show("deviceCard");
+
+    setState("Lecture du service Pax…", "wake");
+    const service = await server.getPrimaryService(PAX_SERVICE);
+    const chars = await service.getCharacteristics();
+    log(`Service Pax trouvé — ${chars.length} caractéristique(s)`, true);
+
+    $("chars").innerHTML = "";
+    for(const c of chars){
+      const props = propsOf(c);
+      const div = document.createElement("div");
+      div.className = "char";
+      div.innerHTML =
+        `<div class="id">${c.uuid}</div>` +
+        `<div class="props">` +
+        props.map(p => `<span class="tag ${p==="notify"?"n":""}">${p}</span>`).join("") +
+        `</div>`;
+      $("chars").appendChild(div);
+      log(`  ${c.uuid.slice(4,8)} → ${props.join(", ") || "aucune propriété"}`);
+
+      // On s'abonne aux notifications pour prouver que le canal de données vit.
+      // Les octets seront chiffrés (AES à partir du numéro de série) — illisibles pour l'instant, c'est normal.
+      if(c.properties.notify){
+        try{
+          await c.startNotifications();
+          c.addEventListener("characteristicvaluechanged", e => {
+            log(`notif ${c.uuid.slice(4,8)} : ${toHex(e.target.value)}`);
+          });
+          log(`  ↳ abonné aux notifications de ${c.uuid.slice(4,8)}`);
+        }catch(err){ log(`  ↳ échec abonnement : ${err.message}`); }
+      }
+    }
+    show("charCard");
+    setState("Connecté", "on");
+    hide("hidden");
+    $("connect").classList.add("hidden");
+    show("actions");
+    $("hint").textContent =
+      "Le canal fonctionne. Les octets « notif » sont chiffrés avec ton numéro de série — l'étape suivante est d'ajouter le déchiffrement AES pour lire batterie et température.";
+  }catch(err){
+    if(err.name === "NotFoundError"){
+      setState("Aucun appareil sélectionné", "");   // l'utilisateur a fermé le sélecteur
+    }else{
+      setState("Erreur : " + err.message, "err");
+      log("ERREUR : " + err.message, true);
+    }
+  }
+}
+
+function onDisconnected(){
+  setState("Déconnecté", "");
+  $("dGatt").textContent = "déconnecté";
+  $("connect").classList.remove("hidden");
+  hide("actions");
+  log("Appareil déconnecté", true);
+}
+
+$("connect").addEventListener("click", connect);
+$("disconnect").addEventListener("click", () => {
+  if(device && device.gatt.connected) device.gatt.disconnect();
+});
+</script>
+</body>
+</html>
