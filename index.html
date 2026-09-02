@@ -193,15 +193,17 @@ async function requestStatus(attrs){
   catch(err){ log("Demande d'état impossible : "+err.message); }
 }
 
-async function readState(){
-  // 1) demander les attributs voulus, 2) lire la caractéristique pour récupérer les réponses
-  await requestStatus([MSG_ACTUAL_TEMP, MSG_SETPOINT, MSG_BATTERY]);
-  for(let i=0;i<14;i++){
-    try{ if(cRead) onValue(await cRead.readValue(), "poll 0201"); }catch(e){}
+async function burstRead(tries){
+  let errShown = false;
+  for(let i=0;i<tries;i++){
+    try{ if(cRead) onValue(await cRead.readValue(), "poll 0201"); }
+    catch(e){ if(!errShown){ log("Lecture 0201 : "+e.message); errShown=true; } }
     await new Promise(r=>setTimeout(r,150));
   }
-  try{ if(cNotify) onValue(await cNotify.readValue(), "lecture 0203"); }catch(e){}
+  try{ if(cNotify) onValue(await cNotify.readValue(), "lecture 0203"); }
+  catch(e){ log("Lecture 0203 : "+e.message); }
 }
+async function readState(){ await burstRead(16); }
 
 // --- envoyer la consigne (type 2, température en dixièmes de °C) ---
 async function applyTemp(){
@@ -214,7 +216,7 @@ async function applyTemp(){
     await cWrite.writeValueWithoutResponse(encryptCommand(plain));
     log(`Consigne envoyée : ${c} °C / ${cToF(c)} °F`, "b");
     try{ localStorage.setItem("paxSetC", String(setC)); }catch(e){}
-    setTimeout(()=>readState(), 500);   // confirmer par lecture
+    setTimeout(()=>burstRead(28), 800);   // grande rafale pour capter la consigne
   }catch(err){ log("Envoi impossible : "+err.message, "b"); }
 }
 
