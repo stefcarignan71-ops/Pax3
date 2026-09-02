@@ -148,8 +148,10 @@ async function connect(){
   }
   try{
     setState("Sélection de l'appareil…", "wake");
+    // Mode diagnostic : on liste TOUS les appareils BLE, comme chrome://bluetooth-internals.
+    // Une fois la connexion validée, on pourra remettre un filtre { namePrefix: "PAX" }.
     device = await navigator.bluetooth.requestDevice({
-      filters: [{ namePrefix: "PAX" }],
+      acceptAllDevices: true,
       optionalServices: [PAX_SERVICE, DEVICE_INFO]
     });
     log(`Appareil choisi : ${device.name || "(sans nom)"}`, true);
@@ -195,7 +197,6 @@ async function connect(){
     }
     show("charCard");
     setState("Connecté", "on");
-    hide("hidden");
     $("connect").classList.add("hidden");
     show("actions");
     $("hint").textContent =
