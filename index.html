@@ -184,15 +184,23 @@ function handlePlain(p){
 
 function onValue(dv, src){
   const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-  if(b.length >= 32){ log(`${src} (${b.length}o) déchiffré`, "b"); handlePlain(decryptPacket(b)); }
-  else log(`${src} (${b.length}o) : ${hex(b)}`);
+  if(b.length===64){                                   // deux paquets de 32 octets
+    log(`${src} (64o) déchiffré`, "b");
+    handlePlain(decryptPacket(b.slice(0,32)));
+    handlePlain(decryptPacket(b.slice(32,64)));
+  }else if(b.length>=32){
+    log(`${src} (${b.length}o) déchiffré`, "b");
+    handlePlain(decryptPacket(b.slice(0,32)));
+  }else log(`${src} (${b.length}o) : ${hex(b)}`);
 }
 
-async function readOnce(){
-  try{
-    if(cNotify){ onValue(await cNotify.readValue(), "lecture 0203"); }
-    if(cRead){   onValue(await cRead.readValue(),   "lecture 0201"); }
-  }catch(err){ log("Lecture impossible : "+err.message); }
+async function readOnce(tries){
+  tries = tries || 12;
+  for(let i=0;i<tries;i++){
+    try{ if(cRead) onValue(await cRead.readValue(), "poll 0201"); }catch(err){}
+    await new Promise(r=>setTimeout(r,180));
+  }
+  try{ if(cNotify) onValue(await cNotify.readValue(), "lecture 0203"); }catch(err){}
 }
 
 // --- envoi de la consigne (type 2, valeur en dixièmes de °C) ---
@@ -205,7 +213,7 @@ async function applyTemp(){
     await cWrite.writeValueWithoutResponse(encryptCommand(plain));
     log(`Consigne envoyée : ${setF} °F (${c.toFixed(1)} °C, brut=${raw})`, "b");
     try{ localStorage.setItem("paxSetF", String(setF)); }catch(e){}
-    setTimeout(readOnce, 700);   // relire pour confirmer ce que l'appareil a retenu
+    setTimeout(function(){ readOnce(15); }, 500);   // rafale : capter la consigne fraîche
   }catch(err){ log("Envoi impossible : "+err.message, "b"); }
 }
 
@@ -237,7 +245,7 @@ async function connect(){
 
     setState("Connecté","on");
     hide("setup"); show("actions"); show("stateCard"); show("setCard");
-    await readOnce();
+    await readOnce(12);
   }catch(err){
     if(err.name==="NotFoundError"){ setState("Aucun appareil sélectionné",""); }
     else{ setState("Erreur : "+err.message,"err"); log("ERREUR : "+err.message,"b"); }
@@ -251,7 +259,7 @@ function onDisconnected(){
 }
 
 $("connect").addEventListener("click", connect);
-$("read").addEventListener("click", readOnce);
+$("read").addEventListener("click", ()=>readOnce(12));
 $("disconnect").addEventListener("click", ()=>{ if(device && device.gatt.connected) device.gatt.disconnect(); });
 $("minus").addEventListener("click", ()=>{ setF=Math.max(F_MIN,setF-F_STEP); renderSet(); });
 $("plus").addEventListener("click",  ()=>{ setF=Math.min(F_MAX,setF+F_STEP); renderSet(); });
