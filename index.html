@@ -194,7 +194,13 @@ async function requestStatus(attrs){
 }
 
 async function readState(){
-  await requestStatus([MSG_ACTUAL_TEMP, MSG_SETPOINT, MSG_BATTERY]);   // le Pax répond par notifications
+  // 1) demander les attributs voulus, 2) lire la caractéristique pour récupérer les réponses
+  await requestStatus([MSG_ACTUAL_TEMP, MSG_SETPOINT, MSG_BATTERY]);
+  for(let i=0;i<14;i++){
+    try{ if(cRead) onValue(await cRead.readValue(), "poll 0201"); }catch(e){}
+    await new Promise(r=>setTimeout(r,150));
+  }
+  try{ if(cNotify) onValue(await cNotify.readValue(), "lecture 0203"); }catch(e){}
 }
 
 // --- envoyer la consigne (type 2, température en dixièmes de °C) ---
@@ -208,7 +214,7 @@ async function applyTemp(){
     await cWrite.writeValueWithoutResponse(encryptCommand(plain));
     log(`Consigne envoyée : ${c} °C / ${cToF(c)} °F`, "b");
     try{ localStorage.setItem("paxSetC", String(setC)); }catch(e){}
-    setTimeout(()=>requestStatus([MSG_SETPOINT]), 500);   // confirmer
+    setTimeout(()=>readState(), 500);   // confirmer par lecture
   }catch(err){ log("Envoi impossible : "+err.message, "b"); }
 }
 
