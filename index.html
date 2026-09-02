@@ -32,7 +32,6 @@
     color:#160d03; background:var(--heat); cursor:pointer; transition:opacity .15s; margin-top:12px}
   button:active{opacity:.85}
   button.ghost{background:transparent; color:var(--muted); border:1px solid var(--line); font-weight:500}
-  button:disabled{opacity:.4; cursor:default}
   .row{display:flex; gap:10px}
   .row button{flex:1}
   .panel{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; margin-top:18px}
@@ -59,10 +58,7 @@
 
 <header>
   <div class="glow" id="glow"></div>
-  <div>
-    <h1>Pax 3 — Contrôle</h1>
-    <div class="state" id="state">Prêt</div>
-  </div>
+  <div><h1>Pax 3 — Contrôle</h1><div class="state" id="state">Prêt</div></div>
 </header>
 
 <div id="setup">
@@ -94,10 +90,7 @@
   <button id="apply">Appliquer</button>
 </div>
 
-<div class="panel hidden" id="logCard">
-  <h2>Journal</h2>
-  <pre id="log"></pre>
-</div>
+<div class="panel hidden" id="logCard"><h2>Journal</h2><pre id="log"></pre></div>
 
 <script>
 "use strict";
@@ -108,156 +101,125 @@ const C_WRITE  = "8e320202-64d2-11e6-bdf4-0800200c9a66";
 const C_NOTIFY = "8e320203-64d2-11e6-bdf4-0800200c9a66";
 const KEYKEY_HEX = "F7C866C38F78753086293BD57DD32540";
 
-// types de messages (confirmés)
-const MSG_ACTUAL_TEMP = 1, MSG_SETPOINT = 2, MSG_BATTERY = 3, MSG_STATUS_UPDATE = 254;
-const MSG_HEATING_STATE = 32;
+const MSG_ACTUAL=1, MSG_SETPOINT=2, MSG_BATTERY=3, MSG_HEATING_STATE=32, MSG_STATUS=254;
 const HEAT_STATES = {
   0:{t:"Chauffe",c:"var(--heat)"}, 1:{t:"Prêt",c:"var(--ok)"}, 2:{t:"Boost (aspiration)",c:"var(--heat)"},
   3:{t:"Refroidit",c:"var(--wake)"}, 4:{t:"Veille",c:"var(--muted)"}, 5:{t:"Four éteint",c:"var(--muted)"},
   6:{t:"Réglage temp.",c:"var(--wake)"}
 };
-// plage validée du Pax 3 (en °C)
-const C_MIN = 175, C_MAX = 215, C_STEP = 1;
+const C_MIN=175, C_MAX=215, C_STEP=1;
 
-const $ = id => document.getElementById(id);
-const glow = $("glow"), state = $("state");
-let device=null, server=null, deviceKey=null;
-let cRead=null, cWrite=null, cNotify=null;
-let setC = 193;   // consigne choisie, en °C
+const $=id=>document.getElementById(id);
+const glow=$("glow"), state=$("state");
+let device=null, server=null, deviceKey=null, cRead=null, cWrite=null, cNotify=null;
+let setC=193;
+let readChain=Promise.resolve();
 
-try{ const s = localStorage.getItem("paxSerial"); if(s) $("serial").value = s; }catch(e){}
-try{ const t = parseInt(localStorage.getItem("paxSetC")); if(t) setC = t; }catch(e){}
+try{ const s=localStorage.getItem("paxSerial"); if(s) $("serial").value=s; }catch(e){}
+try{ const t=parseInt(localStorage.getItem("paxSetC")); if(t) setC=t; }catch(e){}
 
-function setState(t, m){ state.textContent=t; glow.className="glow"+(m?" "+m:""); }
+function setState(t,m){ state.textContent=t; glow.className="glow"+(m?" "+m:""); }
 function show(id){ $(id).classList.remove("hidden"); }
 function hide(id){ $(id).classList.add("hidden"); }
-function log(msg, cls){
+function log(msg,cls){
   show("logCard");
   const t=new Date().toLocaleTimeString("fr-CA");
-  const line = cls==="b" ? `<b>[${t}] ${msg}</b>` : cls==="g" ? `<span class="g">[${t}] ${msg}</span>` : `[${t}] ${msg}`;
-  $("log").insertAdjacentHTML("beforeend", line+"\n");
-  $("log").scrollTop = $("log").scrollHeight;
+  const line = cls==="b"?`<b>[${t}] ${msg}</b>`:cls==="g"?`<span class="g">[${t}] ${msg}</span>`:`[${t}] ${msg}`;
+  $("log").insertAdjacentHTML("beforeend", line+"\n"); $("log").scrollTop=$("log").scrollHeight;
 }
-function hex(arr){ return Array.from(arr, x=>x.toString(16).padStart(2,"0")).join(" "); }
-const cToF = c => Math.round(c*9/5+32);
-
-function renderSet(){ $("setVal").textContent = setC; $("setValF").textContent = cToF(setC); }
+function hex(a){ return Array.from(a,x=>x.toString(16).padStart(2,"0")).join(" "); }
+const cToF=c=>Math.round(c*9/5+32);
+function renderSet(){ $("setVal").textContent=setC; $("setValF").textContent=cToF(setC); }
 renderSet();
 
-// --- crypto (vérifiée) ---
+// crypto (vérifiée, identique au code de référence)
 function deriveKey(serial){
-  const keykey = aesjs.utils.hex.toBytes(KEYKEY_HEX);
-  return new aesjs.ModeOfOperation.ecb(keykey).encrypt(aesjs.utils.utf8.toBytes(serial+serial));
+  const kk=aesjs.utils.hex.toBytes(KEYKEY_HEX);
+  return new aesjs.ModeOfOperation.ecb(kk).encrypt(aesjs.utils.utf8.toBytes(serial+serial));
 }
 function keystream(iv){ return new aesjs.ModeOfOperation.ecb(deviceKey).encrypt(iv); }
-function decryptPacket(bytes){
-  const ct = bytes.slice(0,16), iv = bytes.slice(16,32), ks = keystream(iv);
-  const p = new Uint8Array(16); for(let i=0;i<16;i++) p[i]=ct[i]^ks[i]; return p;
-}
-function encryptCommand(plain16){
-  const iv = crypto.getRandomValues(new Uint8Array(16)), ks = keystream(iv);
-  const out = new Uint8Array(32);
-  for(let i=0;i<16;i++) out[i]=plain16[i]^ks[i];
-  out.set(iv,16); return out;
-}
+function decryptPacket(b){ const ct=b.slice(0,16),iv=b.slice(16,32),ks=keystream(iv);
+  const p=new Uint8Array(16); for(let i=0;i<16;i++)p[i]=ct[i]^ks[i]; return p; }
+function encryptCommand(plain){ const iv=crypto.getRandomValues(new Uint8Array(16)),ks=keystream(iv);
+  const out=new Uint8Array(32); for(let i=0;i<16;i++)out[i]=plain[i]^ks[i]; out.set(iv,16); return out; }
 
-// --- lecture d'un uint16 little-endian en dixièmes de °C ---
-function tempC(p){ return (p[1] | (p[2]<<8)) / 10; }
+const tempC=p=>(p[1]|(p[2]<<8))/10;
 
 function handlePlain(p){
-  const type = p[0];
-  if(type===MSG_BATTERY){
-    $("mBatt").textContent = p[1]+" %"; $("mBatt").className="val";
-    log(`Batterie : ${p[1]} %`, "g");
-  }else if(type===MSG_ACTUAL_TEMP){
-    const c = tempC(p);
-    $("mTemp").innerHTML = `${cToF(c)} <small>°F · ${c.toFixed(1)} °C</small>`; $("mTemp").className="val";
-    log(`Temp actuelle : ${c.toFixed(1)} °C / ${cToF(c)} °F`, "g");
-  }else if(type===MSG_SETPOINT){
-    const c = tempC(p);
-    $("mTarget").innerHTML = `${cToF(c)} <small>°F · ${c.toFixed(1)} °C</small>`; $("mTarget").className="val";
-    log(`Temp cible : ${c.toFixed(1)} °C / ${cToF(c)} °F`, "g");
-  }else if(type===MSG_HEATING_STATE){
-    const st = HEAT_STATES[p[1]] || {t:"état "+p[1], c:"var(--ink)"};
-    const el = $("mHeat"); el.textContent = st.t; el.className="val";
-    el.style.color = st.c; el.style.fontSize = "1.15rem";
-    log(`État de chauffe : ${st.t}`, "g");
-  }else{
-    log(`type ${type} — ${hex(p)}`);
-  }
+  const type=p[0];
+  if(type===MSG_BATTERY){ $("mBatt").textContent=p[1]+" %"; $("mBatt").className="val"; log(`Batterie : ${p[1]} %`,"g"); }
+  else if(type===MSG_ACTUAL){ const c=tempC(p);
+    $("mTemp").innerHTML=`${cToF(c)} <small>°F · ${c.toFixed(1)} °C</small>`; $("mTemp").className="val";
+    log(`Temp actuelle : ${c.toFixed(1)} °C / ${cToF(c)} °F`,"g"); }
+  else if(type===MSG_SETPOINT){ const c=tempC(p);
+    $("mTarget").innerHTML=`${cToF(c)} <small>°F · ${c.toFixed(1)} °C</small>`; $("mTarget").className="val";
+    log(`Temp cible : ${c.toFixed(1)} °C / ${cToF(c)} °F`,"g"); }
+  else if(type===MSG_HEATING_STATE){ const st=HEAT_STATES[p[1]]||{t:"état "+p[1],c:"var(--ink)"};
+    const el=$("mHeat"); el.textContent=st.t; el.className="val"; el.style.color=st.c; el.style.fontSize="1.15rem";
+    log(`État de chauffe : ${st.t}`,"g"); }
+  else log(`type ${type} — ${hex(p)}`);
 }
 
-function onValue(dv, src){
-  const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-  if(b.length===64){ handlePlain(decryptPacket(b.slice(0,32))); handlePlain(decryptPacket(b.slice(32,64))); }
-  else if(b.length>=32){ handlePlain(decryptPacket(b.slice(0,32))); }
-  else log(`${src} (${b.length}o) : ${hex(b)}`);
+// une notification = "nouvelle donnée dispo" -> LIRE 0201 pour la récupérer (lectures sérialisées)
+function pumpRead(){
+  readChain = readChain.then(async ()=>{
+    try{
+      const dv = await cRead.readValue();
+      const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+      if(b.length===64){ handlePlain(decryptPacket(b.slice(0,32))); handlePlain(decryptPacket(b.slice(32,64))); }
+      else if(b.length>=32){ handlePlain(decryptPacket(b.slice(0,32))); }
+    }catch(e){}
+  });
+  return readChain;
 }
 
-// --- demander des attributs : message StatusUpdate (254) + masque de bits ---
+// demander des attributs -> le Pax émet des notifications -> pumpRead
 async function requestStatus(attrs){
-  let mask = 0n;
-  for(const a of attrs) mask |= (1n << BigInt(a));
-  const plain = new Uint8Array(16);
-  plain[0] = MSG_STATUS_UPDATE;
+  let mask=0n; for(const a of attrs) mask |= (1n<<BigInt(a));
+  const plain=new Uint8Array(16); plain[0]=MSG_STATUS;
   new DataView(plain.buffer).setBigUint64(1, mask, true);
-  try{ await cWrite.writeValueWithoutResponse(encryptCommand(plain)); }
-  catch(err){ log("Demande d'état impossible : "+err.message); }
+  try{ await cWrite.writeValueWithoutResponse(encryptCommand(plain)); }catch(e){ log("Demande impossible : "+e.message); }
 }
 
-async function burstRead(tries){
-  let errShown = false;
-  for(let i=0;i<tries;i++){
-    try{ if(cRead) onValue(await cRead.readValue(), "poll 0201"); }
-    catch(e){ if(!errShown){ log("Lecture 0201 : "+e.message); errShown=true; } }
-    await new Promise(r=>setTimeout(r,150));
-  }
-  try{ if(cNotify) onValue(await cNotify.readValue(), "lecture 0203"); }
-  catch(e){ log("Lecture 0203 : "+e.message); }
+async function readState(){
+  await requestStatus([MSG_ACTUAL, MSG_SETPOINT, MSG_BATTERY, MSG_HEATING_STATE]);
+  for(let i=0;i<6;i++){ pumpRead(); await new Promise(r=>setTimeout(r,180)); }  // filet de sécurité
 }
-async function readState(){ await burstRead(16); }
 
-// --- envoyer la consigne (type 2, température en dixièmes de °C) ---
 async function applyTemp(){
   if(!cWrite) return;
-  const c = Math.max(C_MIN, Math.min(C_MAX, setC));
-  const plain = new Uint8Array(16);
-  plain[0] = MSG_SETPOINT;
+  const c=Math.max(C_MIN,Math.min(C_MAX,setC));
+  const plain=new Uint8Array(16); plain[0]=MSG_SETPOINT;
   new DataView(plain.buffer).setUint16(1, Math.round(c*10), true);
   try{
     await cWrite.writeValueWithoutResponse(encryptCommand(plain));
-    log(`Consigne envoyée : ${c} °C / ${cToF(c)} °F`, "b");
-    try{ localStorage.setItem("paxSetC", String(setC)); }catch(e){}
-    setTimeout(()=>burstRead(28), 800);   // grande rafale pour capter la consigne
-  }catch(err){ log("Envoi impossible : "+err.message, "b"); }
+    log(`Consigne envoyée : ${c} °C / ${cToF(c)} °F`,"b");
+    try{ localStorage.setItem("paxSetC",String(setC)); }catch(e){}
+    setTimeout(async ()=>{ await requestStatus([MSG_SETPOINT, MSG_ACTUAL, MSG_HEATING_STATE]);
+      for(let i=0;i<6;i++){ pumpRead(); await new Promise(r=>setTimeout(r,180)); } }, 400);
+  }catch(e){ log("Envoi impossible : "+e.message,"b"); }
 }
 
 async function connect(){
-  const serial = $("serial").value.trim().toUpperCase();
+  const serial=$("serial").value.trim().toUpperCase();
   if(serial.length!==8){ setState("Numéro de série : 8 caractères requis","err"); return; }
   if(!window.aesjs){ setState("Librairie AES non chargée (réseau ?)","err"); return; }
   if(!navigator.bluetooth){ setState("Web Bluetooth indisponible — Chrome/Android en HTTPS","err"); return; }
-
-  try{ localStorage.setItem("paxSerial", serial); }catch(e){}
-  deviceKey = deriveKey(serial);
-  log("Clé de l'appareil dérivée du numéro de série", "b");
-
+  try{ localStorage.setItem("paxSerial",serial); }catch(e){}
+  deviceKey=deriveKey(serial);
   try{
     setState("Sélection de l'appareil…","wake");
-    device = await navigator.bluetooth.requestDevice({ filters:[{namePrefix:"PAX"}], optionalServices:[PAX_SERVICE] });
+    device=await navigator.bluetooth.requestDevice({ filters:[{namePrefix:"PAX"}], optionalServices:[PAX_SERVICE] });
     device.addEventListener("gattserverdisconnected", onDisconnected);
-
     setState("Connexion…","wake");
-    server = await device.gatt.connect();
-    const svc = await server.getPrimaryService(PAX_SERVICE);
-    cRead   = await svc.getCharacteristic(C_READ);
-    cWrite  = await svc.getCharacteristic(C_WRITE);
-    cNotify = await svc.getCharacteristic(C_NOTIFY);
-
+    server=await device.gatt.connect();
+    const svc=await server.getPrimaryService(PAX_SERVICE);
+    cRead=await svc.getCharacteristic(C_READ);
+    cWrite=await svc.getCharacteristic(C_WRITE);
+    cNotify=await svc.getCharacteristic(C_NOTIFY);
     await cNotify.startNotifications();
-    cNotify.addEventListener("characteristicvaluechanged", e => onValue(e.target.value, "notif"));
-    log("Connecté — abonné aux notifications", "b");
-
+    cNotify.addEventListener("characteristicvaluechanged", ()=>pumpRead());  // notif -> lire 0201
+    log("Connecté","b");
     setState("Connecté","on");
     hide("setup"); show("actions"); show("stateCard"); show("setCard");
     await readState();
@@ -267,15 +229,11 @@ async function connect(){
   }
 }
 
-function onDisconnected(){
-  setState("Déconnecté","");
-  show("setup"); hide("actions"); hide("setCard");
-  log("Appareil déconnecté","b");
-}
+function onDisconnected(){ setState("Déconnecté",""); show("setup"); hide("actions"); hide("setCard"); log("Déconnecté","b"); }
 
 $("connect").addEventListener("click", connect);
 $("read").addEventListener("click", ()=>readState());
-$("disconnect").addEventListener("click", ()=>{ if(device && device.gatt.connected) device.gatt.disconnect(); });
+$("disconnect").addEventListener("click", ()=>{ if(device&&device.gatt.connected) device.gatt.disconnect(); });
 $("minus").addEventListener("click", ()=>{ setC=Math.max(C_MIN,setC-C_STEP); renderSet(); });
 $("plus").addEventListener("click",  ()=>{ setC=Math.min(C_MAX,setC+C_STEP); renderSet(); });
 $("apply").addEventListener("click", applyTemp);
