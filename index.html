@@ -81,6 +81,7 @@
   <div class="metric"><span class="lab">Batterie</span><span class="val empty" id="mBatt">—</span></div>
   <div class="metric"><span class="lab">Température actuelle</span><span class="val empty" id="mTemp">—</span></div>
   <div class="metric"><span class="lab">Température cible</span><span class="val empty" id="mTarget">—</span></div>
+  <div class="metric"><span class="lab">État de chauffe</span><span class="val empty" id="mHeat">—</span></div>
 </div>
 
 <div class="panel hidden" id="setCard">
@@ -109,6 +110,12 @@ const KEYKEY_HEX = "F7C866C38F78753086293BD57DD32540";
 
 // types de messages (confirmés)
 const MSG_ACTUAL_TEMP = 1, MSG_SETPOINT = 2, MSG_BATTERY = 3, MSG_STATUS_UPDATE = 254;
+const MSG_HEATING_STATE = 32;
+const HEAT_STATES = {
+  0:{t:"Chauffe",c:"var(--heat)"}, 1:{t:"Prêt",c:"var(--ok)"}, 2:{t:"Boost (aspiration)",c:"var(--heat)"},
+  3:{t:"Refroidit",c:"var(--wake)"}, 4:{t:"Veille",c:"var(--muted)"}, 5:{t:"Four éteint",c:"var(--muted)"},
+  6:{t:"Réglage temp.",c:"var(--wake)"}
+};
 // plage validée du Pax 3 (en °C)
 const C_MIN = 175, C_MAX = 215, C_STEP = 1;
 
@@ -170,6 +177,11 @@ function handlePlain(p){
     const c = tempC(p);
     $("mTarget").innerHTML = `${cToF(c)} <small>°F · ${c.toFixed(1)} °C</small>`; $("mTarget").className="val";
     log(`Temp cible : ${c.toFixed(1)} °C / ${cToF(c)} °F`, "g");
+  }else if(type===MSG_HEATING_STATE){
+    const st = HEAT_STATES[p[1]] || {t:"état "+p[1], c:"var(--ink)"};
+    const el = $("mHeat"); el.textContent = st.t; el.className="val";
+    el.style.color = st.c; el.style.fontSize = "1.15rem";
+    log(`État de chauffe : ${st.t}`, "g");
   }else{
     log(`type ${type} — ${hex(p)}`);
   }
