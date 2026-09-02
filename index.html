@@ -43,7 +43,6 @@
   .metric .val{font-size:1.5rem; font-weight:600; font-variant-numeric:tabular-nums}
   .metric .val small{font-size:.85rem; color:var(--muted); font-weight:500; margin-left:4px}
   .metric .val.empty{color:var(--muted); font-size:1rem; font-weight:400}
-  /* réglage température */
   .setrow{display:flex; align-items:center; gap:14px; margin:4px 0 2px}
   .setrow .big{flex:1; text-align:center; font-size:2.1rem; font-weight:700; font-variant-numeric:tabular-nums}
   .setrow .big small{display:block; font-size:.8rem; color:var(--muted); font-weight:500; margin-top:2px}
@@ -88,7 +87,7 @@
   <h2>Régler la température</h2>
   <div class="setrow">
     <button class="step" id="minus">−</button>
-    <div class="big"><span id="setVal">380</span> °F<small><span id="setValC">193</span> °C</small></div>
+    <div class="big"><span id="setVal">193</span> °C<small><span id="setValF">380</span> °F</small></div>
     <button class="step" id="plus">+</button>
   </div>
   <button id="apply">Appliquer</button>
@@ -104,21 +103,23 @@
 
 const PAX_SERVICE = "8e320200-64d2-11e6-bdf4-0800200c9a66";
 const C_READ   = "8e320201-64d2-11e6-bdf4-0800200c9a66";
-const C_WRITE  = "8e320202-64d2-11e6-bdf4-0800200c9a66"; // commandes
-const C_NOTIFY = "8e320203-64d2-11e6-bdf4-0800200c9a66"; // état
+const C_WRITE  = "8e320202-64d2-11e6-bdf4-0800200c9a66";
+const C_NOTIFY = "8e320203-64d2-11e6-bdf4-0800200c9a66";
 const KEYKEY_HEX = "F7C866C38F78753086293BD57DD32540";
 
-// plage valide du Pax 3
-const F_MIN = 360, F_MAX = 420, F_STEP = 5;
+// types de messages (confirmés)
+const MSG_ACTUAL_TEMP = 1, MSG_SETPOINT = 2, MSG_BATTERY = 3, MSG_STATUS_UPDATE = 254;
+// plage validée du Pax 3 (en °C)
+const C_MIN = 175, C_MAX = 215, C_STEP = 1;
 
 const $ = id => document.getElementById(id);
 const glow = $("glow"), state = $("state");
 let device=null, server=null, deviceKey=null;
 let cRead=null, cWrite=null, cNotify=null;
-let setF = 380;
+let setC = 193;   // consigne choisie, en °C
 
 try{ const s = localStorage.getItem("paxSerial"); if(s) $("serial").value = s; }catch(e){}
-try{ const t = parseInt(localStorage.getItem("paxSetF")); if(t) setF = t; }catch(e){}
+try{ const t = parseInt(localStorage.getItem("paxSetC")); if(t) setC = t; }catch(e){}
 
 function setState(t, m){ state.textContent=t; glow.className="glow"+(m?" "+m:""); }
 function show(id){ $(id).classList.remove("hidden"); }
@@ -131,89 +132,83 @@ function log(msg, cls){
   $("log").scrollTop = $("log").scrollHeight;
 }
 function hex(arr){ return Array.from(arr, x=>x.toString(16).padStart(2,"0")).join(" "); }
-const fToC = f => (f-32)*5/9;
-const cToF = c => c*9/5+32;
+const cToF = c => Math.round(c*9/5+32);
 
-// --- réglage de la consigne (affichage) ---
-function renderSet(){
-  $("setVal").textContent = setF;
-  $("setValC").textContent = Math.round(fToC(setF));
-}
+function renderSet(){ $("setVal").textContent = setC; $("setValF").textContent = cToF(setC); }
 renderSet();
 
 // --- crypto (vérifiée) ---
 function deriveKey(serial){
   const keykey = aesjs.utils.hex.toBytes(KEYKEY_HEX);
-  const input = aesjs.utils.utf8.toBytes(serial + serial);
-  return new aesjs.ModeOfOperation.ecb(keykey).encrypt(input);
+  return new aesjs.ModeOfOperation.ecb(keykey).encrypt(aesjs.utils.utf8.toBytes(serial+serial));
 }
 function keystream(iv){ return new aesjs.ModeOfOperation.ecb(deviceKey).encrypt(iv); }
 function decryptPacket(bytes){
-  if(bytes.length < 32) return null;
   const ct = bytes.slice(0,16), iv = bytes.slice(16,32), ks = keystream(iv);
-  const p = new Uint8Array(16); for(let i=0;i<16;i++) p[i]=ct[i]^ks[i];
-  return p;
+  const p = new Uint8Array(16); for(let i=0;i<16;i++) p[i]=ct[i]^ks[i]; return p;
 }
 function encryptCommand(plain16){
   const iv = crypto.getRandomValues(new Uint8Array(16)), ks = keystream(iv);
   const out = new Uint8Array(32);
-  for(let i=0;i<16;i++) out[i] = plain16[i]^ks[i];
-  out.set(iv,16);
-  return out;
+  for(let i=0;i<16;i++) out[i]=plain16[i]^ks[i];
+  out.set(iv,16); return out;
 }
 
-const TYPES = {1:"Temp actuelle",2:"Temp cible",3:"Batterie",4:"Usage",6:"Verrouillage",7:"Charge",17:"Plages"};
+// --- lecture d'un uint16 little-endian en dixièmes de °C ---
+function tempC(p){ return (p[1] | (p[2]<<8)) / 10; }
 
 function handlePlain(p){
-  const type=p[0], name=TYPES[type]||("type "+type);
-  if(type===3){
+  const type = p[0];
+  if(type===MSG_BATTERY){
     $("mBatt").textContent = p[1]+" %"; $("mBatt").className="val";
-    log(`${name} : ${p[1]} %`, "g");
-  }else if(type===1){                          // température actuelle = dixièmes de °F
-    const f = (p[1]|(p[2]<<8))/10, c = Math.round(fToC(f));
-    $("mTemp").innerHTML = `${f.toFixed(1)} <small>°F · ${c} °C</small>`; $("mTemp").className="val";
-    log(`${name} : ${f.toFixed(1)} °F / ${c} °C`, "g");
-  }else if(type===2){                          // consigne = dixièmes de °C
-    const c = (p[1]|(p[2]<<8))/10, f = Math.round(cToF(c));
-    $("mTarget").innerHTML = `${f} <small>°F · ${c.toFixed(1)} °C</small>`; $("mTarget").className="val";
-    log(`${name} : ${f} °F / ${c.toFixed(1)} °C  (brut=${p[1]|(p[2]<<8)})`, "g");
+    log(`Batterie : ${p[1]} %`, "g");
+  }else if(type===MSG_ACTUAL_TEMP){
+    const c = tempC(p);
+    $("mTemp").innerHTML = `${cToF(c)} <small>°F · ${c.toFixed(1)} °C</small>`; $("mTemp").className="val";
+    log(`Temp actuelle : ${c.toFixed(1)} °C / ${cToF(c)} °F`, "g");
+  }else if(type===MSG_SETPOINT){
+    const c = tempC(p);
+    $("mTarget").innerHTML = `${cToF(c)} <small>°F · ${c.toFixed(1)} °C</small>`; $("mTarget").className="val";
+    log(`Temp cible : ${c.toFixed(1)} °C / ${cToF(c)} °F`, "g");
   }else{
-    log(`${name} — ${hex(p)}`);
+    log(`type ${type} — ${hex(p)}`);
   }
 }
 
 function onValue(dv, src){
   const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-  if(b.length===64){                                   // deux paquets de 32 octets
-    log(`${src} (64o) déchiffré`, "b");
-    handlePlain(decryptPacket(b.slice(0,32)));
-    handlePlain(decryptPacket(b.slice(32,64)));
-  }else if(b.length>=32){
-    log(`${src} (${b.length}o) déchiffré`, "b");
-    handlePlain(decryptPacket(b.slice(0,32)));
-  }else log(`${src} (${b.length}o) : ${hex(b)}`);
+  if(b.length===64){ handlePlain(decryptPacket(b.slice(0,32))); handlePlain(decryptPacket(b.slice(32,64))); }
+  else if(b.length>=32){ handlePlain(decryptPacket(b.slice(0,32))); }
+  else log(`${src} (${b.length}o) : ${hex(b)}`);
 }
 
-async function readOnce(tries){
-  tries = tries || 12;
-  for(let i=0;i<tries;i++){
-    try{ if(cRead) onValue(await cRead.readValue(), "poll 0201"); }catch(err){}
-    await new Promise(r=>setTimeout(r,180));
-  }
-  try{ if(cNotify) onValue(await cNotify.readValue(), "lecture 0203"); }catch(err){}
-}
-
-// --- envoi de la consigne (type 2, valeur en dixièmes de °C) ---
-async function applyTemp(){
-  if(!cWrite){ return; }
-  const c = fToC(setF), raw = Math.round(c*10);
+// --- demander des attributs : message StatusUpdate (254) + masque de bits ---
+async function requestStatus(attrs){
+  let mask = 0n;
+  for(const a of attrs) mask |= (1n << BigInt(a));
   const plain = new Uint8Array(16);
-  plain[0]=2; plain[1]=raw & 0xff; plain[2]=(raw>>8)&0xff;
+  plain[0] = MSG_STATUS_UPDATE;
+  new DataView(plain.buffer).setBigUint64(1, mask, true);
+  try{ await cWrite.writeValueWithoutResponse(encryptCommand(plain)); }
+  catch(err){ log("Demande d'état impossible : "+err.message); }
+}
+
+async function readState(){
+  await requestStatus([MSG_ACTUAL_TEMP, MSG_SETPOINT, MSG_BATTERY]);   // le Pax répond par notifications
+}
+
+// --- envoyer la consigne (type 2, température en dixièmes de °C) ---
+async function applyTemp(){
+  if(!cWrite) return;
+  const c = Math.max(C_MIN, Math.min(C_MAX, setC));
+  const plain = new Uint8Array(16);
+  plain[0] = MSG_SETPOINT;
+  new DataView(plain.buffer).setUint16(1, Math.round(c*10), true);
   try{
     await cWrite.writeValueWithoutResponse(encryptCommand(plain));
-    log(`Consigne envoyée : ${setF} °F (${c.toFixed(1)} °C, brut=${raw})`, "b");
-    try{ localStorage.setItem("paxSetF", String(setF)); }catch(e){}
-    setTimeout(function(){ readOnce(15); }, 500);   // rafale : capter la consigne fraîche
+    log(`Consigne envoyée : ${c} °C / ${cToF(c)} °F`, "b");
+    try{ localStorage.setItem("paxSetC", String(setC)); }catch(e){}
+    setTimeout(()=>requestStatus([MSG_SETPOINT]), 500);   // confirmer
   }catch(err){ log("Envoi impossible : "+err.message, "b"); }
 }
 
@@ -240,12 +235,12 @@ async function connect(){
     cNotify = await svc.getCharacteristic(C_NOTIFY);
 
     await cNotify.startNotifications();
-    cNotify.addEventListener("characteristicvaluechanged", e => onValue(e.target.value, "notif 0203"));
+    cNotify.addEventListener("characteristicvaluechanged", e => onValue(e.target.value, "notif"));
     log("Connecté — abonné aux notifications", "b");
 
     setState("Connecté","on");
     hide("setup"); show("actions"); show("stateCard"); show("setCard");
-    await readOnce(12);
+    await readState();
   }catch(err){
     if(err.name==="NotFoundError"){ setState("Aucun appareil sélectionné",""); }
     else{ setState("Erreur : "+err.message,"err"); log("ERREUR : "+err.message,"b"); }
@@ -259,10 +254,10 @@ function onDisconnected(){
 }
 
 $("connect").addEventListener("click", connect);
-$("read").addEventListener("click", ()=>readOnce(12));
+$("read").addEventListener("click", ()=>readState());
 $("disconnect").addEventListener("click", ()=>{ if(device && device.gatt.connected) device.gatt.disconnect(); });
-$("minus").addEventListener("click", ()=>{ setF=Math.max(F_MIN,setF-F_STEP); renderSet(); });
-$("plus").addEventListener("click",  ()=>{ setF=Math.min(F_MAX,setF+F_STEP); renderSet(); });
+$("minus").addEventListener("click", ()=>{ setC=Math.max(C_MIN,setC-C_STEP); renderSet(); });
+$("plus").addEventListener("click",  ()=>{ setC=Math.min(C_MAX,setC+C_STEP); renderSet(); });
 $("apply").addEventListener("click", applyTemp);
 </script>
 </body>
