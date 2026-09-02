@@ -78,6 +78,8 @@
   <div class="metric"><span class="lab">Température actuelle</span><span class="val empty" id="mTemp">—</span></div>
   <div class="metric"><span class="lab">Température cible</span><span class="val empty" id="mTarget">—</span></div>
   <div class="metric"><span class="lab">État de chauffe</span><span class="val empty" id="mHeat">—</span></div>
+  <div class="metric"><span class="lab">Cible dynamique</span><span class="val empty" id="mDyn">—</span></div>
+  <div class="metric"><span class="lab">Verrou</span><span class="val empty" id="mLock">—</span></div>
 </div>
 
 <div class="panel hidden" id="setCard">
@@ -101,7 +103,7 @@ const C_WRITE  = "8e320202-64d2-11e6-bdf4-0800200c9a66";
 const C_NOTIFY = "8e320203-64d2-11e6-bdf4-0800200c9a66";
 const KEYKEY_HEX = "F7C866C38F78753086293BD57DD32540";
 
-const MSG_ACTUAL=1, MSG_SETPOINT=2, MSG_BATTERY=3, MSG_HEATING_STATE=32, MSG_STATUS=254;
+const MSG_ACTUAL=1, MSG_SETPOINT=2, MSG_BATTERY=3, MSG_LOCK=6, MSG_DYN_TARGET=31, MSG_HEATING_STATE=32, MSG_STATUS=254;
 const HEAT_STATES = {
   0:{t:"Chauffe",c:"var(--heat)"}, 1:{t:"Prêt",c:"var(--ok)"}, 2:{t:"Boost (aspiration)",c:"var(--heat)"},
   3:{t:"Refroidit",c:"var(--wake)"}, 4:{t:"Veille",c:"var(--muted)"}, 5:{t:"Four éteint",c:"var(--muted)"},
@@ -157,6 +159,13 @@ function handlePlain(p){
   else if(type===MSG_HEATING_STATE){ const st=HEAT_STATES[p[1]]||{t:"état "+p[1],c:"var(--ink)"};
     const el=$("mHeat"); el.textContent=st.t; el.className="val"; el.style.color=st.c; el.style.fontSize="1.15rem";
     log(`État de chauffe : ${st.t}`,"g"); }
+  else if(type===MSG_DYN_TARGET){ const c=tempC(p);
+    $("mDyn").innerHTML=`${cToF(c)} <small>°F · ${c.toFixed(1)} °C</small>`; $("mDyn").className="val";
+    log(`Cible dynamique : ${c.toFixed(1)} °C / ${cToF(c)} °F`,"g"); }
+  else if(type===MSG_LOCK){ const locked=p[1]===1;
+    const el=$("mLock"); el.textContent=locked?"Verrouillé":"Déverrouillé"; el.className="val";
+    el.style.color=locked?"var(--bad)":"var(--ok)"; el.style.fontSize="1.15rem";
+    log(`Verrou : ${locked?"VERROUILLÉ":"déverrouillé"}`,"g"); }
   else log(`type ${type} — ${hex(p)}`);
 }
 
@@ -182,7 +191,7 @@ async function requestStatus(attrs){
 }
 
 async function readState(){
-  await requestStatus([MSG_ACTUAL, MSG_SETPOINT, MSG_BATTERY, MSG_HEATING_STATE]);
+  await requestStatus([MSG_ACTUAL, MSG_SETPOINT, MSG_BATTERY, MSG_HEATING_STATE, MSG_DYN_TARGET, MSG_LOCK]);
   for(let i=0;i<6;i++){ pumpRead(); await new Promise(r=>setTimeout(r,180)); }  // filet de sécurité
 }
 
@@ -192,11 +201,11 @@ async function applyTemp(){
   const plain=new Uint8Array(16); plain[0]=MSG_SETPOINT;
   new DataView(plain.buffer).setUint16(1, Math.round(c*10), true);
   try{
-    await cWrite.writeValueWithoutResponse(encryptCommand(plain));
-    log(`Consigne envoyée : ${c} °C / ${cToF(c)} °F`,"b");
+    for(let k=0;k<3;k++){ await cWrite.writeValueWithoutResponse(encryptCommand(plain)); await new Promise(r=>setTimeout(r,120)); }
+    log(`Consigne envoyée (×3) : ${c} °C / ${cToF(c)} °F`,"b");
     try{ localStorage.setItem("paxSetC",String(setC)); }catch(e){}
-    setTimeout(async ()=>{ await requestStatus([MSG_SETPOINT, MSG_ACTUAL, MSG_HEATING_STATE]);
-      for(let i=0;i<6;i++){ pumpRead(); await new Promise(r=>setTimeout(r,180)); } }, 400);
+    setTimeout(async ()=>{ await requestStatus([MSG_SETPOINT, MSG_DYN_TARGET, MSG_LOCK, MSG_ACTUAL, MSG_HEATING_STATE]);
+      for(let i=0;i<8;i++){ pumpRead(); await new Promise(r=>setTimeout(r,170)); } }, 400);
   }catch(e){ log("Envoi impossible : "+e.message,"b"); }
 }
 
